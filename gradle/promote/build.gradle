@@ -1,0 +1,199 @@
+import org.apache.http.HttpEntity
+import org.apache.http.HttpHost
+import org.apache.http.HttpResponse
+import org.apache.http.auth.AuthScope
+import org.apache.http.auth.UsernamePasswordCredentials
+import org.apache.http.client.AuthCache
+import org.apache.http.client.methods.HttpPost
+import org.apache.http.impl.auth.BasicScheme
+import org.apache.http.impl.client.BasicAuthCache
+import org.apache.http.impl.client.DefaultHttpClient
+import org.apache.http.protocol.BasicHttpContext
+import org.apache.http.client.protocol.ClientContext
+import org.apache.http.util.EntityUtils
+
+
+defaultTasks 'promote'
+
+ext.basPromoPlugin = 'sagmilestonepromo'
+
+description = """
+Performs binary promotion of a build to a milestone status. The build to promote is identified by a 'promote.build.name' and 'promote.build.number' project properties.
+If the 'promote.build.number' property is not specified, the script will try to read a 'PROMOTED_URL' environment variable and expect to find an archived 'gradle.properties'
+artifact containing the standard BAS build properties of the build to promote. The archive artifact path can be further configured via a 'gradle.properties.path' project property.
+The specified build must have already been published to the BAS repository with an integration status.
+All dependencies of the build to promote must have at least milestone status for the promotion to succeed."""
+
+URL repoUrl = parseRepoUrl()
+URL gradlePropertiesUrl
+//************************CHANGE FOR JENKINS******************
+
+String buildName = ""
+String isExt = System.getenv('IS_EXT')
+if(isExt==null){
+    isExt = "false";
+}
+if(isExt=="true"){
+    buildName = "com.softwareag.mom.is.cs.providersExt.${project.property('bas.provider.build.name')}"
+}else{
+    buildName = "com.softwareag.mom.is.cs.providers.${project.property('bas.provider.build.name')}"
+}
+//************************************************************
+
+String buildNumber
+//if (project.hasProperty('promote.build.number')) {
+
+String build_number = System.getenv('BUILD_URL')
+if (!(build_number==null))
+{
+    String[] buildUrlArray = build_number.split("/")
+    build_number = buildUrlArray[5]
+    buildNumber ="${project.property('build.version.major')}.${project.property('build.version.minor')}.${project.property('build.version.micro')}.0.${build_number}"// project.property('promote.build.number')
+
+}
+//}
+//else if (System.env.containsKey('PROMOTED_URL')) {
+//    String buildUrl = System.env.get('PROMOTED_URL')
+//    String gradlePropertiesPath = project.hasProperty('gradle.properties.path') ? project.property('gradle.properties.path') : 'gradle.properties'
+//    gradlePropertiesUrl = new URL(buildUrl + 'artifact' + (gradlePropertiesPath.startsWith('/') ? gradlePropertiesPath : '/' + gradlePropertiesPath))
+//}
+//else {
+//    throw new GradleException("This script requires a 'promote.build.number' property identifying the build number to promote, or a 'PROMOTED_URL' environment variable to read the 'gradle.properties' job artifact from.")
+//}
+
+task clean {
+    doLast {
+        project.delete(buildDir)
+    }
+}
+
+task maybeReadGradleProperties {
+    description "Reads an archived 'gradle.properties' file containing the BAS version properties from any 'PROMOTED_URL/artifact/gradle.properties' url."
+    dependsOn clean
+    doLast {
+        if (gradlePropertiesUrl) {
+            buildDir.mkdirs()
+            File buildGradleProperties = new File(buildDir, "$buildName-gradle.properties")
+            ant.get(src: gradlePropertiesUrl, dest: buildGradleProperties.absolutePath)
+
+            Properties gradleProps = new Properties()
+            buildGradleProperties.withInputStream {
+                gradleProps.load(it)
+            }
+
+            int major  = Integer.parseInt(gradleProps.getProperty('build.version.major', '0'))
+            int minor  = Integer.parseInt(gradleProps.getProperty('build.version.minor', '0'))
+            int micro  = Integer.parseInt(gradleProps.getProperty('build.version.micro', '0'))
+            int patch  = Integer.parseInt(gradleProps.getProperty('build.patch', '0'))
+            int number = Integer.parseInt(gradleProps.getProperty('build.number', '0'))
+
+            buildNumber = String.format('%d.%d.%d.%d.%d', major, minor, micro, patch, number)
+        }
+    }
+}
+task promote {
+    description = "Performs binary promotion of a build to a milestone status on the BAS repository."
+    dependsOn maybeReadGradleProperties
+    doLast {
+        promote(repoUrl, buildName, buildNumber, false)
+    }
+}
+
+task dryRunPromote {
+    description = "Performs a dry run binary promotion of a build to a milestone status on the BAS repository."
+    dependsOn maybeReadGradleProperties
+    doLast {
+        promote(repoUrl, buildName, buildNumber, true)
+    }
+}
+
+def promote(URL repoUrl, String buildName, String buildNumber, boolean dryRun) {
+    logger.info "Promoting build '${buildName}:${buildNumber}' to a milestone status in a dry run mode ..."
+
+    Expando response = post(repoUrl, "api/plugins/build/promote/$basPromoPlugin/$buildName/$buildNumber" + (dryRun ? "?params=dryRun=true" : ""), project.property('promote.arm.username'), project.property('promote.arm.password'))
+    if (response.statusCode != 200) {
+        logger.error "$response.statusLine"
+        String message = "Failed to promote build '${buildName}:${buildNumber}' to a milestone status:\n ${response.statusLine}. \nReason: ${response.text}"
+        throw new GradleException(message)
+    }
+    else {
+        logger.info "Successfully promoted build '${buildName}:${buildNumber}' to a milestone status in a dry run mode."
+    }
+}
+
+def post(URL repoUrl, String path, String username, String password) {
+    DefaultHttpClient httpclient = new DefaultHttpClient()
+    try {
+        httpclient.getCredentialsProvider().setCredentials(
+                new AuthScope(repoUrl.getHost(), repoUrl.getPort()),
+                new UsernamePasswordCredentials(username, password))
+
+        HttpHost targetHost = new HttpHost(repoUrl.getHost(), repoUrl.getPort(), repoUrl.getProtocol())
+
+        AuthCache authCache = new BasicAuthCache()
+        authCache.put(targetHost, new BasicScheme())
+
+        // Add AuthCache to the execution context
+        BasicHttpContext localContext = new BasicHttpContext()
+        localContext.setAttribute(ClientContext.AUTH_CACHE, authCache)
+
+        HttpPost httpPost = new HttpPost(new URL(repoUrl, path).toString())
+        logger.info "Executing $httpPost.requestLine"
+
+        HttpResponse response = httpclient.execute(targetHost, httpPost, localContext)
+
+        String responseText = null
+        if (response.getStatusLine().getStatusCode() != 200) {
+            HttpEntity entity = null
+            try {
+                entity = response.getEntity()
+                if (entity != null) {
+                    ByteArrayOutputStream bout = new ByteArrayOutputStream()
+                    entity.writeTo(bout)
+                    responseText = bout.toString(entity.getContentEncoding() != null ? entity.getContentEncoding().getValue() : 'UTF-8')
+                }
+            }
+            finally {
+                EntityUtils.consume(entity)
+            }
+        }
+        return new Expando(statusLine: response.getStatusLine(), statusCode: response.getStatusLine().getStatusCode(), text: responseText ?: 'N/A')
+    }
+    finally {
+        httpclient.getConnectionManager().shutdown()
+    }
+}
+
+def parseRepoUrl() {
+    assert project.hasProperty('repo.host') : "No 'repo.host' property configured, please make sure you are using latest BAS init.gradle script."
+    assert project.hasProperty('repo.path') : "No 'repo.path' property configured, please make sure you are using latest BAS init.gradle script."
+
+    String repoUrl = "http://" + project.property('repo.host')
+    if (project.hasProperty('repo.port')) {
+        repoUrl += ':' + project.property('repo.port')
+    }
+    repoUrl += '/' + project.property('repo.path')
+
+    if (!repoUrl.endsWith('/')) {
+        repoUrl += '/'
+    }
+
+    return new URL(repoUrl)
+}
+
+
+buildscript {
+    dependencies {
+        classpath( 'org.apache.httpcomponents:httpclient:4.5.13',
+                'org.apache.httpcomponents:httpcore:4.4.13',
+                'commons-codec:commons-codec:1.14')
+        repositories {
+            println 'Plugin repo Code'
+
+            // Use JCenter for resolving dependencies.
+            mavenCentral()
+
+        }
+    }
+
+}

@@ -1,0 +1,199 @@
+apply plugin: 'application'
+apply plugin: 'distribution'
+apply plugin: 'maven-publish'
+
+def secretsProperties = new Properties()
+
+
+project.ext.projectreponame = project.property('repo.name')
+project.ext.buildDependencyRepoName = project.property('build.dependency.reponame')
+project.ext.buildDependencyOrganization = project.property('build.dependency.organization')
+project.ext.basresolverstatus = project.property('bas.provider.resolver.status')
+def tempResolverStatus = project.property("bas.provider.resolver.status")
+def tempbasurl =  project.property('bas.artifactory.url')
+tempbasurl+="/${project.property("bas.resolver.mapping.${tempResolverStatus}")}"
+project.ext.bas_promotion_url =tempbasurl
+//project.basurl= project.property('bas.providerext.resolver.status')
+def buildDependencySecretTokenSource = project.property('build.dependency.secret.token.source')
+
+def tempbuildDependencyToken = System.getenv("${buildDependencySecretTokenSource}")
+if(tempbuildDependencyToken==null||tempbuildDependencyToken==""){
+    def secretsPropertiesFile = rootProject.file("./secrets.properties")
+    secretsProperties.load(new FileInputStream(secretsPropertiesFile))
+    project.ext.buildDependencyToken = secretsProperties['build.dependency.organization.token']
+}else{
+    project.ext.buildDependencyToken = tempbuildDependencyToken
+}
+project.ext.buildDependencyURL = project.property('build.dependency.url')
+
+
+//Build SNAPSHOT details
+project.ext.buildSnapshotUrl = project.property('build.snapshot.url')
+project.ext.basSnapshotUrl = project.property('bas.artifactory.url')
+project.ext.buildSnapshotOrganizationName = project.property('build.snapshot.organization')
+project.ext.buildSnapshotRepoName = project.property('build.snapshot.reponame')
+def buildSnapshotSecretTokenSource = project.property('build.snapshot.secret.token.source')
+
+def tempbuildSnapshotToken = System.getenv("${buildSnapshotSecretTokenSource}")
+if(tempbuildSnapshotToken==null||tempbuildSnapshotToken==""){
+
+    project.ext.buildSnapshotToken = secretsProperties['build.snapshot.organization.token']
+}else project.ext.buildSnapshotToken = tempbuildSnapshotToken
+def buildSnapshotRunNumberSource = project.property('build.snapshot.run.number.source')
+
+def buildSnapshotRunNumber = System.getenv("${buildSnapshotRunNumberSource}")
+if(buildSnapshotRunNumber==null||buildSnapshotRunNumber==""){
+    buildSnapshotRunNumber = "0"
+}
+
+project.ext.providerPackageName = project.property("provider.package.name")
+project.ext.providerExtPackageName = project.property("providerext.package.name")
+
+//Jenkins related changes
+allprojects {
+    def buildNumber = System.getenv("BUILD_NUMBER")
+    if (buildNumber == null) {
+        buildNumber = "1"
+    }
+    String isExt = System.getenv('IS_EXT')
+    if(isExt==null){
+        isExt = "false";
+    }
+    buildNumber = buildNumber.padLeft(4,'0')
+    if(isExt=="true"){
+        group = "com.softwareag.mom.is.cs.providersExt.${project.property('bas.provider.name')}"
+    }else{
+        group = "com.softwareag.mom.is.cs.providers.${project.property('bas.provider.name')}"
+    }
+
+    version = "${project.property('build.version.major')}.${project.property('build.version.minor')}.${project.property('build.version.micro')}-v${buildNumber}"
+    apply plugin: 'com.jfrog.artifactory'
+}
+
+project.ext.manifestBuildNumber = ""
+String manifestBuildNumberTemp=""
+if (System.getenv("BUILD_NUMBER")==null){
+    manifestBuildNumberTemp = "${project.property('build.version.major')}.${project.property('build.version.minor')}.${project.property('build.version.micro')}-${buildSnapshotRunNumber}"
+
+} else
+    manifestBuildNumberTemp = "${project.property('build.version.major')}.${project.property('build.version.minor')}.${project.property('build.version.micro')}.0.${System.getenv("BUILD_NUMBER")}"
+project.setProperty("manifestBuildNumber",manifestBuildNumberTemp)//
+
+buildscript {
+    repositories {
+        jcenter()
+    }
+    dependencies {
+        classpath "org.jfrog.buildinfo:build-info-extractor-gradle:latest.release"
+    }
+}
+
+artifactory {
+    clientConfig.setIncludeEnvVars(true)
+    clientConfig.info.addEnvironmentProperty('test.adding.dynVar',new java.util.Date().toString())
+
+    contextUrl = 'http://bas.eur.ad.sag:8081/artifactory'
+    String isExt = System.getenv('IS_EXT')
+    if(isExt==null){
+        isExt = "false";
+    }
+    buildInfo {
+
+        if(isExt=="true"){
+            buildName = "com.softwareag.mom.is.cs.providersExt.${project.property('bas.providerext.build.name')}"
+        }else{
+            buildName = "com.softwareag.mom.is.cs.providers.${project.property('bas.provider.build.name')}"
+        }
+
+
+        buildNumber =  "${project.property('build.version.major')}.${project.property('build.version.minor')}.${project.property('build.version.micro')}.0.${System.getenv("BUILD_NUMBER")}"
+        buildUrl = System.getenv("BUILD_URL")
+    }
+    publish {
+        repository {
+            repoKey = 'lib-snapshot-local' // The Artifactory repository key to publish to
+            username = project.hasProperty('promote.arm.username') ? project.property('promote.arm.username') : 'anonymous'
+            password = project.hasProperty('promote.arm.password') ? project.property('promote.arm.password') : ''
+            // This is an optional section for configuring Ivy publication (when publishIvy = true).
+            ivy {
+                ivyLayout = '[organization]/[module]/[revision]/ivy-[revision].xml'
+                artifactLayout = '[organization]/[module]/[revision]/[module]-[revision](-[classifier]).[ext]'
+                mavenCompatible = true //Convert any dots in an [organization] layout value to path separators, similar to Maven's groupId-to-path conversion. True if not specified
+            }
+        }
+        defaults {
+            // Reference to Gradle publications defined in the build script.
+            // This is how we tell the Artifactory Plugin which artifacts should be
+            // published to Artifactory.
+            // publications('ivy')
+            publishArtifacts = true
+            publishBuildInfo = true
+
+            // Properties to be attached to the published artifacts.
+            String buildName_prop = ""
+            if(isExt=="true"){
+                buildName_prop = "com.softwareag.mom.is.cs.providersExt.${project.property('bas.providerext.build.name')}"
+            }else{
+                buildName_prop = "com.softwareag.mom.is.cs.providers.${project.property('bas.provider.build.name')}"
+            }
+            properties = ['build.name': "${buildName_prop}", 'build.number' : "${project.property('build.version.major')}.${project.property('build.version.minor')}.${project.property('build.version.micro')}.0.${System.getenv("BUILD_NUMBER")}",'build.status':'integration','build.timestamp':new Date().toString()]
+            publishPom = true // Publish generated POM files to Artifactory (true by default)
+            publishIvy = true // Publish generated Ivy descriptor files to Artifactory (true by default)
+        }
+    }
+}
+
+//Jenkins related changes End
+
+repositories {
+    // Use JCenter for resolving dependencies.
+    mavenCentral()
+    maven{
+        url "${project.buildDependencyURL}/${project.buildDependencyOrganization}/${project.buildDependencyRepoName}"//#####################################--build.dependency.url
+        credentials {
+            username project.buildDependencyOrganization //##############################--build.dependency.organization
+            password project.buildDependencyToken //secretsProperties['build.dependency.organization.token']//#############"e8a7800a8044f4386447b946073e4325435efe7d"
+        }
+    }
+}
+dependencies {
+    // https://mvnrepository.com/artifact/org.apache.httpcomponents/httpclient
+    compile group: 'org.apache.httpcomponents', name: 'httpclient', version: '4.5.13'
+    compile group: 'org.apache.httpcomponents', name: 'httpcore', version: '4.4.13'
+    compile group: 'commons-codec', name: 'commons-codec', version: '1.14'
+
+    //implementation 'org.apache.commons:commons-codec:1.3.0'
+}
+
+task createProjectZip(type: Zip, group: 'wm') {
+
+    archiveName "${projectreponame.toLowerCase()}.zip"
+    destinationDir file("build/distributions")
+
+    from "${rootDir}/build/tmpzip" //code,connectors,config,resources"
+    description "Assemble archive"
+    exclude "build"
+    exclude "libs"
+
+}
+publishing {
+    repositories {
+        maven {
+            name = "SNAPSHOT"
+            url = "${project.buildSnapshotUrl}/${project.buildSnapshotOrganizationName}/${project.buildSnapshotRepoName}"
+            credentials {
+                username project.buildSnapshotOrganizationName
+                password project.buildSnapshotToken//System.getenv("GH_SECRET_TOKEN")//secretsProperties['GH_SEC_TOKEN']//password "e8a7800a8044f4386447b946073e4325435efe7d"//project.findProperty("gpr.key") ?: System.getenv("GITHUB_TOKEN")
+            }
+        }
+    }
+    publications {
+        gpr(MavenPublication) {
+            groupId = 'com.sag.connectors'
+            artifactId = "${rootProject.name.toLowerCase()}"
+            version = "${project.property('build.version.major')}.${project.property('build.version.minor')}.${project.property('build.version.micro')}-${buildSnapshotRunNumber}"
+            artifact source: createProjectZip, extension: 'zip'
+        }
+    }
+}
+publishGprPublicationToSNAPSHOTRepository.dependsOn createProjectZip

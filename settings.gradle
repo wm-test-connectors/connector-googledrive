@@ -1,0 +1,9 @@
+/*Updated by Bat script*/
+rootProject.name = 'connector-template'
+
+include ':#WmTemplateProvider#'
+
+
+project(":#WmTemplateProvider#").projectDir = new File(rootDir, 'packages/#WmTemplateProvider#')
+//project(":#WmTemplateProviderExt#").projectDir = new File(rootDir, 'packages/#WmTemplateProviderExt#')
+//project(":promote").projectDir = new File(rootDir, 'gradle/promote')
